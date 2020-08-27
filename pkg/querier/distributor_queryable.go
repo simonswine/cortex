@@ -126,8 +126,13 @@ func (q *distributorQuerier) Select(_ bool, sp *storage.SelectHints, matchers ..
 	return series.MatrixToSeriesSet(matrix)
 }
 
+type ReadTenantsResolver interface {
+	UserID(context.Context) (string, error)
+	ResolveReadTenants(context.Context) ([]string, string, error)
+}
+
 func (q *distributorQuerier) streamingSelect(minT, maxT int64, matchers []*labels.Matcher) storage.SeriesSet {
-	userID, err := user.ExtractOrgID(q.ctx)
+	userID, tenantIDs, err := user.ExtractOrgID(q.ctx)
 	if err != nil {
 		return storage.ErrSeriesSet(err)
 	}
