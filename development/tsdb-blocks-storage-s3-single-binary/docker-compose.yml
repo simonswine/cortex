@@ -16,7 +16,11 @@ services:
     ports:
       - 9000:9000
     volumes:
-      - .data-minio:/data:delegated
+      - data-minio:/data
+    entrypoint:
+      - sh
+      - -euc
+      - mkdir -p /data/cortex-tsdb && mkdir -p /data/cortex-rules && /usr/bin/minio server /data
 
   prometheus:
     image: prom/prometheus:v2.16.0
@@ -60,8 +64,8 @@ services:
     ports:
       - 8001:8001
     volumes:
-      - ./config:/cortex/config
-      - .data-cortex-1:/data:delegated
+      - ./config:/cortex/config:z
+      - data-cortex-1:/data
 
   cortex-2:
     build:
@@ -81,5 +85,56 @@ services:
     ports:
       - 8002:8002
     volumes:
-      - ./config:/cortex/config
-      - .data-cortex-2:/data:delegated
+      - ./config:/cortex/config:z
+      - data-cortex-2:/data
+
+  haproxy:
+    image: haproxy:2.2.2
+    entrypoint:
+      - sh
+      - -euc
+      - |
+        cat > /etc/haproxy.cfg <<EOF
+        defaults
+            maxconn 4096
+            mode http
+            option forwardfor
+            option http-server-close
+            option redispatch
+            retries 3
+            timeout client 50000
+            timeout connect 5000
+            timeout server 50000
+
+        frontend stats
+          bind *:1936
+          stats uri /
+          stats show-legends timeout 2m
+          no log
+
+        userlist users
+          user user-a insecure-password secret
+          user user-b insecure-password secret
+          user user-c insecure-password secret
+
+        frontend http_front
+          bind *:8000
+          acl authorized http_auth(users)
+          http-request auth realm Login if !authorized
+          use_backend http_back if authorized
+
+        backend http_back
+          balance roundrobin
+          http-request set-header X-Scope-OrgID %[req.hdr(Authorization)]
+          http-request del-header Authorization
+          server cortex-1 cortex-1:8001 check init-addr libc
+          server cortex-2 cortex-2:8002 check init-addr libc
+        EOF
+        exec haproxy -f /etc/haproxy.cfg
+    ports:
+      - 8000:8000
+      - 1936:1936
+volumes:
+  data-minio: {}
+  data-cortex-1: {}
+  data-cortex-2: {}
