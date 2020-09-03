@@ -16,7 +16,7 @@ scrape_configs:
           container: 'cortex-2'
 
 remote_write:
-  - url: http://haproxy:8000/api/prom/push
+  - url: http://traefik:8000/api/prom/push
     basic_auth:
       username: user-a
       password: secret

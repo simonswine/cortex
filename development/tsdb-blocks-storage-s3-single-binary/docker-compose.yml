@@ -88,52 +88,57 @@ services:
       - ./config:/cortex/config:z
       - data-cortex-2:/data
 
-  haproxy:
-    image: haproxy:2.2.2
+  traefik:
+    image: traefik:v2.2.8
     entrypoint:
       - sh
       - -euc
       - |
-        cat > /etc/haproxy.cfg <<EOF
-        defaults
-            maxconn 4096
-            mode http
-            option forwardfor
-            option http-server-close
-            option redispatch
-            retries 3
-            timeout client 50000
-            timeout connect 5000
-            timeout server 50000
-
-        frontend stats
-          bind *:1936
-          stats uri /
-          stats show-legends timeout 2m
-          no log
-
-        userlist users
-          user user-a insecure-password secret
-          user user-b insecure-password secret
-          user user-c insecure-password secret
-
-        frontend http_front
-          bind *:8000
-          acl authorized http_auth(users)
-          http-request auth realm Login if !authorized
-          use_backend http_back if authorized
-
-        backend http_back
-          balance roundrobin
-          http-request set-header X-Scope-OrgID %[req.hdr(Authorization)]
-          http-request del-header Authorization
-          server cortex-1 cortex-1:8001 check init-addr libc
-          server cortex-2 cortex-2:8002 check init-addr libc
+        mkdir -p /etc/traefik/config
+        cat > /etc/traefik/traefik.yaml <<"EOF"
+        api:
+          dashboard: true
+          insecure: true
+        providers:
+          file:
+            directory: /etc/traefik/config
+            watch: true
+        entryPoints:
+          web:
+           address: ":8000"
         EOF
-        exec haproxy -f /etc/haproxy.cfg
+        cat > /etc/traefik/config/cortex.yaml <<"EOF"
+        http:
+          routers:
+            cortex:
+              #entryPoints:
+              #  - web
+              rule: "PathPrefix(`/`)"
+              middlewares:
+                - auth
+              service: "cortex"
+          services:
+            cortex:
+              loadBalancer:
+                healthCheck:
+                  path: /ready
+                servers:
+                - url: http://cortex-1:8001
+                - url: http://cortex-2:8002
+          middlewares:
+            auth:
+              basicAuth:
+                users:
+                  - "user-a:$$apr1$$VmVBtFUs$$TnTCfILmXbhQRJyeDBcol0" # secret
+                  - "user-b:$$apr1$$VmVBtFUs$$TnTCfILmXbhQRJyeDBcol0" # secret
+                  - "user-c:$$apr1$$VmVBtFUs$$TnTCfILmXbhQRJyeDBcol0" # secret
+                headerField: X-Scope-OrgID
+                removeHeader: true
+        EOF
+        exec traefik
     ports:
       - 8000:8000
-      - 1936:1936
+
 volumes:
   data-minio: {}
   data-cortex-1: {}
