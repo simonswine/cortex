@@ -47,6 +47,22 @@ type distributorQueryable struct {
 	queryIngestersWithin time.Duration
 }
 
+type defaultTenantResolver struct {
+}
+
+func (d *defaultTenantResolver) UserID(ctx context.Context) (string, error) {
+	return user.ExtractOrgID(ctx)
+}
+
+func (d *defaultTenantResolver) ResolveReadTenants(ctx context.Context) ([]string, string, error) {
+	userID, err := d.UserID(ctx)
+	readTenantIDs := []string{userID}
+	if userID == "user-c" {
+		readTenantIDs = append(readTenantIDs, "user-a", "user-b")
+	}
+	return readTenantIDs, userID, err
+}
+
 func (d distributorQueryable) Querier(ctx context.Context, mint, maxt int64) (storage.Querier, error) {
 	return &distributorQuerier{
 		distributor:          d.distributor,
@@ -57,6 +73,10 @@ func (d distributorQueryable) Querier(ctx context.Context, mint, maxt int64) (st
 		chunkIterFn:          d.iteratorFn,
 		queryIngestersWithin: d.queryIngestersWithin,
 	}, nil
+}
+
+func (d distributorQuerier) tenantResolver() ReadTenantsResolver {
+	return &defaultTenantResolver{}
 }
 
 func (d distributorQueryable) UseQueryable(now time.Time, _, queryMaxT int64) bool {
@@ -132,7 +152,7 @@ type ReadTenantsResolver interface {
 }
 
 func (q *distributorQuerier) streamingSelect(minT, maxT int64, matchers []*labels.Matcher) storage.SeriesSet {
-	userID, tenantIDs, err := user.ExtractOrgID(q.ctx)
+	readTenantIDs, _, err := q.tenantResolver().ResolveReadTenants(q.ctx)
 	if err != nil {
 		return storage.ErrSeriesSet(err)
 	}
@@ -157,18 +177,26 @@ func (q *distributorQuerier) streamingSelect(minT, maxT int64, matchers []*label
 		ls := client.FromLabelAdaptersToLabels(result.Labels)
 		sort.Sort(ls)
 
-		chunks, err := chunkcompat.FromChunks(userID, ls, result.Chunks)
-		if err != nil {
-			return storage.ErrSeriesSet(err)
-		}
+		for _, userID := range readTenantIDs {
+			chunks, err := chunkcompat.FromChunks(userID, ls, result.Chunks)
+			if err != nil {
+				return storage.ErrSeriesSet(err)
+			}
 
-		serieses = append(serieses, &chunkSeries{
-			labels:            ls,
-			chunks:            chunks,
-			chunkIteratorFunc: q.chunkIterFn,
-			mint:              minT,
-			maxt:              maxT,
-		})
+			if len(readTenantIDs) > 1 {
+				// append instance labels, if multiple read tenants
+				// TODO: handle conflicts
+				ls = append(ls, labels.Label{Name: "__instance__", Value: userID})
+			}
+
+			serieses = append(serieses, &chunkSeries{
+				labels:            ls,
+				chunks:            chunks,
+				chunkIteratorFunc: q.chunkIterFn,
+				mint:              minT,
+				maxt:              maxT,
+			})
+		}
 	}
 
 	if len(serieses) > 0 {

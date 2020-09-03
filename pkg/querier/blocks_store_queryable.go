@@ -290,7 +290,7 @@ func (q *blocksStoreQuerier) getUserID() string {
 	if len(q.userIDs) == 0 {
 		return "fake"
 	}
-	return strings.Join(q.userIDs, "/")
+	return q.userIDs[0]
 }
 
 // Select implements storage.Querier interface.
