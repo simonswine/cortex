@@ -2,6 +2,7 @@ package querier
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
@@ -146,38 +147,39 @@ func (q *distributorQuerier) Select(_ bool, sp *storage.SelectHints, matchers ..
 	return series.MatrixToSeriesSet(matrix)
 }
 
-type ReadTenantsResolver interface {
-	UserID(context.Context) (string, error)
-	ResolveReadTenants(context.Context) ([]string, string, error)
-}
-
 func (q *distributorQuerier) streamingSelect(minT, maxT int64, matchers []*labels.Matcher) storage.SeriesSet {
 	readTenantIDs, _, err := q.tenantResolver().ResolveReadTenants(q.ctx)
 	if err != nil {
 		return storage.ErrSeriesSet(err)
+
 	}
 
-	results, err := q.distributor.QueryStream(q.ctx, model.Time(minT), model.Time(maxT), matchers...)
-	if err != nil {
-		return storage.ErrSeriesSet(err)
-	}
+	fmt.Printf("XXX readTenantIDs=%s\n", readTenantIDs)
 
 	sets := []storage.SeriesSet(nil)
-	if len(results.Timeseries) > 0 {
-		sets = append(sets, newTimeSeriesSeriesSet(results.Timeseries))
-	}
 
-	serieses := make([]storage.Series, 0, len(results.Chunkseries))
-	for _, result := range results.Chunkseries {
-		// Sometimes the ingester can send series that have no data.
-		if len(result.Chunks) == 0 {
-			continue
+	for _, userID := range readTenantIDs {
+		ctx := user.InjectOrgID(q.ctx, userID)
+
+		results, err := q.distributor.QueryStream(ctx, model.Time(minT), model.Time(maxT), matchers...)
+		if err != nil {
+			return storage.ErrSeriesSet(err)
 		}
 
-		ls := client.FromLabelAdaptersToLabels(result.Labels)
-		sort.Sort(ls)
+		if len(results.Timeseries) > 0 {
+			sets = append(sets, newTimeSeriesSeriesSet(results.Timeseries))
+		}
 
-		for _, userID := range readTenantIDs {
+		serieses := make([]storage.Series, 0, len(results.Chunkseries))
+		for _, result := range results.Chunkseries {
+			// Sometimes the ingester can send series that have no data.
+			if len(result.Chunks) == 0 {
+				continue
+			}
+
+			ls := client.FromLabelAdaptersToLabels(result.Labels)
+			sort.Sort(ls)
+
 			chunks, err := chunkcompat.FromChunks(userID, ls, result.Chunks)
 			if err != nil {
 				return storage.ErrSeriesSet(err)
@@ -197,10 +199,9 @@ func (q *distributorQuerier) streamingSelect(minT, maxT int64, matchers []*label
 				maxt:              maxT,
 			})
 		}
-	}
-
-	if len(serieses) > 0 {
-		sets = append(sets, series.NewConcreteSeriesSet(serieses))
+		if len(serieses) > 0 {
+			sets = append(sets, series.NewConcreteSeriesSet(serieses))
+		}
 	}
 
 	if len(sets) == 0 {
