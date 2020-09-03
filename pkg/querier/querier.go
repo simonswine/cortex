@@ -129,7 +129,12 @@ func NewChunkStoreQueryable(cfg Config, chunkStore chunkstore.ChunkStore) storag
 func New(cfg Config, limits *validation.Overrides, distributor Distributor, stores []QueryableWithFilter, tombstonesLoader *purger.TombstonesLoader, reg prometheus.Registerer) (storage.SampleAndChunkQueryable, *promql.Engine) {
 	iteratorFunc := getChunksIteratorFunction(cfg)
 
-	distributorQueryable := newDistributorQueryable(distributor, cfg.IngesterStreaming, iteratorFunc, cfg.QueryIngestersWithin)
+	mergeDistributor := &mergeDistributor{
+		upstream: distributor,
+		resolver: &hackyTenantResolver{},
+	}
+
+	distributorQueryable := newDistributorQueryable(mergeDistributor, cfg.IngesterStreaming, iteratorFunc, cfg.QueryIngestersWithin)
 
 	ns := make([]QueryableWithFilter, len(stores))
 	for ix, s := range stores {

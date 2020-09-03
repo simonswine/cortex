@@ -2,7 +2,6 @@ package querier
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"time"
 
@@ -48,22 +47,6 @@ type distributorQueryable struct {
 	queryIngestersWithin time.Duration
 }
 
-type defaultTenantResolver struct {
-}
-
-func (d *defaultTenantResolver) UserID(ctx context.Context) (string, error) {
-	return user.ExtractOrgID(ctx)
-}
-
-func (d *defaultTenantResolver) ResolveReadTenants(ctx context.Context) ([]string, string, error) {
-	userID, err := d.UserID(ctx)
-	readTenantIDs := []string{userID}
-	if userID == "user-c" {
-		readTenantIDs = append(readTenantIDs, "user-a", "user-b")
-	}
-	return readTenantIDs, userID, err
-}
-
 func (d distributorQueryable) Querier(ctx context.Context, mint, maxt int64) (storage.Querier, error) {
 	return &distributorQuerier{
 		distributor:          d.distributor,
@@ -74,10 +57,6 @@ func (d distributorQueryable) Querier(ctx context.Context, mint, maxt int64) (st
 		chunkIterFn:          d.iteratorFn,
 		queryIngestersWithin: d.queryIngestersWithin,
 	}, nil
-}
-
-func (d distributorQuerier) tenantResolver() ReadTenantsResolver {
-	return &defaultTenantResolver{}
 }
 
 func (d distributorQueryable) UseQueryable(now time.Time, _, queryMaxT int64) bool {
@@ -148,60 +127,47 @@ func (q *distributorQuerier) Select(_ bool, sp *storage.SelectHints, matchers ..
 }
 
 func (q *distributorQuerier) streamingSelect(minT, maxT int64, matchers []*labels.Matcher) storage.SeriesSet {
-	readTenantIDs, _, err := q.tenantResolver().ResolveReadTenants(q.ctx)
+	userID, err := user.ExtractOrgID(q.ctx)
 	if err != nil {
 		return storage.ErrSeriesSet(err)
-
 	}
 
-	fmt.Printf("XXX readTenantIDs=%s\n", readTenantIDs)
+	results, err := q.distributor.QueryStream(q.ctx, model.Time(minT), model.Time(maxT), matchers...)
+	if err != nil {
+		return storage.ErrSeriesSet(err)
+	}
 
 	sets := []storage.SeriesSet(nil)
+	if len(results.Timeseries) > 0 {
+		sets = append(sets, newTimeSeriesSeriesSet(results.Timeseries))
+	}
 
-	for _, userID := range readTenantIDs {
-		ctx := user.InjectOrgID(q.ctx, userID)
+	serieses := make([]storage.Series, 0, len(results.Chunkseries))
+	for _, result := range results.Chunkseries {
+		// Sometimes the ingester can send series that have no data.
+		if len(result.Chunks) == 0 {
+			continue
+		}
 
-		results, err := q.distributor.QueryStream(ctx, model.Time(minT), model.Time(maxT), matchers...)
+		ls := client.FromLabelAdaptersToLabels(result.Labels)
+		sort.Sort(ls)
+
+		chunks, err := chunkcompat.FromChunks(userID, ls, result.Chunks)
 		if err != nil {
 			return storage.ErrSeriesSet(err)
 		}
 
-		if len(results.Timeseries) > 0 {
-			sets = append(sets, newTimeSeriesSeriesSet(results.Timeseries))
-		}
+		serieses = append(serieses, &chunkSeries{
+			labels:            ls,
+			chunks:            chunks,
+			chunkIteratorFunc: q.chunkIterFn,
+			mint:              minT,
+			maxt:              maxT,
+		})
+	}
 
-		serieses := make([]storage.Series, 0, len(results.Chunkseries))
-		for _, result := range results.Chunkseries {
-			// Sometimes the ingester can send series that have no data.
-			if len(result.Chunks) == 0 {
-				continue
-			}
-
-			ls := client.FromLabelAdaptersToLabels(result.Labels)
-			sort.Sort(ls)
-
-			chunks, err := chunkcompat.FromChunks(userID, ls, result.Chunks)
-			if err != nil {
-				return storage.ErrSeriesSet(err)
-			}
-
-			if len(readTenantIDs) > 1 {
-				// append instance labels, if multiple read tenants
-				// TODO: handle conflicts
-				ls = append(ls, labels.Label{Name: "__instance__", Value: userID})
-			}
-
-			serieses = append(serieses, &chunkSeries{
-				labels:            ls,
-				chunks:            chunks,
-				chunkIteratorFunc: q.chunkIterFn,
-				mint:              minT,
-				maxt:              maxT,
-			})
-		}
-		if len(serieses) > 0 {
-			sets = append(sets, series.NewConcreteSeriesSet(serieses))
-		}
+	if len(serieses) > 0 {
+		sets = append(sets, series.NewConcreteSeriesSet(serieses))
 	}
 
 	if len(sets) == 0 {
