@@ -259,7 +259,7 @@ func (q *BlocksStoreQueryable) Querier(ctx context.Context, mint, maxt int64) (s
 		ctx:             ctx,
 		minT:            mint,
 		maxT:            maxt,
-		userIDs:         []string{userID},
+		userID:          userID,
 		finder:          q.finder,
 		stores:          q.stores,
 		metrics:         q.metrics,
@@ -273,7 +273,7 @@ func (q *BlocksStoreQueryable) Querier(ctx context.Context, mint, maxt int64) (s
 type blocksStoreQuerier struct {
 	ctx         context.Context
 	minT, maxT  int64
-	userIDs     []string
+	userID      string
 	finder      BlocksFinder
 	stores      BlocksStoreSet
 	metrics     *blocksStoreQueryableMetrics
@@ -284,13 +284,6 @@ type blocksStoreQuerier struct {
 	// If set, the querier manipulates the max time to not be greater than
 	// "now - queryStoreAfter" so that most recent blocks are not queried.
 	queryStoreAfter time.Duration
-}
-
-func (q *blocksStoreQuerier) getUserID() string {
-	if len(q.userIDs) == 0 {
-		return "fake"
-	}
-	return q.userIDs[0]
 }
 
 // Select implements storage.Querier interface.
@@ -343,17 +336,9 @@ func (q *blocksStoreQuerier) selectSorted(sp *storage.SelectHints, matchers ...*
 	}
 
 	// Find the list of blocks we need to query given the time range.
-	var knownMetas []*BlockMeta
-	knownDeletionMarks := make(map[ulid.ULID]*metadata.DeletionMark)
-	for _, userID := range q.userIDs {
-		myKnownMetas, myKnownDeletionMarks, err := q.finder.GetBlocks(userID, minT, maxT)
-		if err != nil {
-			return storage.ErrSeriesSet(err)
-		}
-		knownMetas = append(knownMetas, myKnownMetas...)
-		for key, val := range myKnownDeletionMarks {
-			knownDeletionMarks[key] = val
-		}
+	knownMetas, knownDeletionMarks, err := q.finder.GetBlocks(q.userID, minT, maxT)
+	if err != nil {
+		return storage.ErrSeriesSet(err)
 	}
 
 	if len(knownMetas) == 0 {
@@ -375,7 +360,7 @@ func (q *blocksStoreQuerier) selectSorted(sp *storage.SelectHints, matchers ...*
 		resWarnings       = storage.Warnings(nil)
 		resQueriedBlocks  = []ulid.ULID(nil)
 
-		maxChunksLimit  = q.limits.MaxChunksPerQuery(q.getUserID())
+		maxChunksLimit  = q.limits.MaxChunksPerQuery(q.userID)
 		leftChunksLimit = maxChunksLimit
 	)
 
@@ -440,7 +425,7 @@ func (q *blocksStoreQuerier) selectSorted(sp *storage.SelectHints, matchers ...*
 	}
 
 	// We've not been able to query all expected blocks after all retries.
-	err := fmt.Errorf("consistency check failed because some blocks were not queried: %s", strings.Join(convertULIDsToString(remainingBlocks), " "))
+	err = fmt.Errorf("consistency check failed because some blocks were not queried: %s", strings.Join(convertULIDsToString(remainingBlocks), " "))
 	level.Warn(util.WithContext(spanCtx, spanLog)).Log("msg", "failed consistency check", "err", err)
 
 	return storage.ErrSeriesSet(err)
@@ -457,7 +442,7 @@ func (q *blocksStoreQuerier) fetchSeriesFromStores(
 	leftChunksLimit int,
 ) ([]storage.SeriesSet, []ulid.ULID, storage.Warnings, int, error) {
 	var (
-		reqCtx        = grpc_metadata.AppendToOutgoingContext(ctx, cortex_tsdb.TenantIDExternalLabel, q.getUserID())
+		reqCtx        = grpc_metadata.AppendToOutgoingContext(ctx, cortex_tsdb.TenantIDExternalLabel, q.userID)
 		g, gCtx       = errgroup.WithContext(reqCtx)
 		mtx           = sync.Mutex{}
 		seriesSets    = []storage.SeriesSet(nil)
