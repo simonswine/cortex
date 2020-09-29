@@ -64,6 +64,9 @@ type Config struct {
 
 	SecondStoreEngine        string       `yaml:"second_store_engine"`
 	UseSecondStoreBeforeTime flagext.Time `yaml:"use_second_store_before_time"`
+
+	// readTenantResolver
+	multiTenantResolver MultiTenantResolver `yaml:"-"`
 }
 
 var (
@@ -103,6 +106,10 @@ func (cfg *Config) Validate() error {
 	return nil
 }
 
+func (cfg *Config) WithMultiTenantResolver(r MultiTenantResolver) {
+	cfg.multiTenantResolver = r
+}
+
 func (cfg *Config) GetStoreGatewayAddresses() []string {
 	if cfg.StoreGatewayAddresses == "" {
 		return nil
@@ -130,9 +137,12 @@ func New(cfg Config, limits *validation.Overrides, distributor Distributor, stor
 	iteratorFunc := getChunksIteratorFunction(cfg)
 
 	wrapQueryable := func(q QueryableWithFilter) QueryableWithFilter {
+		if cfg.multiTenantResolver == nil {
+			return q
+		}
 		return &mergeQueryable{
 			upstream: q,
-			resolver: &hackyTenantResolver{},
+			resolver: cfg.multiTenantResolver,
 		}
 	}
 

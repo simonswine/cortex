@@ -16,43 +16,31 @@ import (
 
 const tenantLabel model.LabelName = "__instance__"
 
-type ReadTenantsResolver interface {
+type MultiTenantResolver interface {
+	// Return the UserID from the request context
 	UserID(context.Context) (string, error)
-	ResolveReadTenants(context.Context) ([]string, string, error)
-}
-
-type hackyTenantResolver struct {
-}
-
-func (d *hackyTenantResolver) UserID(ctx context.Context) (string, error) {
-	return user.ExtractOrgID(ctx)
-}
-
-func (d *hackyTenantResolver) ResolveReadTenants(ctx context.Context) ([]string, string, error) {
-	userID, err := d.UserID(ctx)
-	readTenantIDs := []string{userID}
-	if userID == "user-c" {
-		readTenantIDs = append(readTenantIDs, "user-a", "user-b")
-	}
-	return readTenantIDs, userID, err
+	// Return the readTenantIDS
+	ReadTenantIDs(context.Context) ([]string, string, error)
+	TenantLabelName(context.Context) (model.LabelName, error)
 }
 
 var _ QueryableWithFilter = &mergeQueryable{}
 
 type mergeQueryable struct {
 	upstream QueryableWithFilter
-	resolver ReadTenantsResolver
+	resolver MultiTenantResolver
 }
 
 type mergeQuerier struct {
-	queriers  []storage.Querier
-	tenantIDs []string
+	queriers        []storage.Querier
+	tenantIDs       []string
+	tenantLabelName model.LabelName
 }
 
 // LabelValues returns all potential values for a label name.
 // It is not safe to use the strings beyond the lifefime of the querier.
 func (m *mergeQuerier) LabelValues(name string) ([]string, storage.Warnings, error) {
-	if name == string(tenantLabel) {
+	if name == string(m.tenantLabelName) {
 		return m.tenantIDs, nil, nil
 	}
 
@@ -72,7 +60,7 @@ func (m *mergeQuerier) LabelValues(name string) ([]string, storage.Warnings, err
 func (m *mergeQuerier) LabelNames() ([]string, storage.Warnings, error) {
 	funcs := []func() ([]string, storage.Warnings, error){
 		// add tenant label label
-		func() ([]string, storage.Warnings, error) { return []string{string(tenantLabel)}, nil, nil },
+		func() ([]string, storage.Warnings, error) { return []string{string(m.tenantLabelName)}, nil, nil },
 	}
 	for pos := range m.tenantIDs {
 		funcs = append(
@@ -100,7 +88,7 @@ func (m *mergeQuerier) Close() error {
 // Caller can specify if it requires returned series to be sorted. Prefer not requiring sorting for better performance.
 // It allows passing hints that can help in optimising select, but it's up to implementation how this is used if used at all.
 func (m *mergeQuerier) Select(sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
-	tenantIDsPos, filteredMatchers := filterValuesByMatchers(string(tenantLabel), m.tenantIDs, matchers...)
+	tenantIDsPos, filteredMatchers := filterValuesByMatchers(string(m.tenantLabelName), m.tenantIDs, matchers...)
 	var seriesSets = make([]storage.SeriesSet, len(tenantIDsPos))
 	for pos, posTenant := range tenantIDsPos {
 		tenantID := m.tenantIDs[posTenant]
@@ -108,7 +96,7 @@ func (m *mergeQuerier) Select(sortSeries bool, hints *storage.SelectHints, match
 			upstream: m.queriers[posTenant].Select(sortSeries, hints, filteredMatchers...),
 			labels: labels.Labels{
 				{
-					Name:  string(tenantLabel),
+					Name:  string(m.tenantLabelName),
 					Value: tenantID,
 				},
 			},
@@ -167,12 +155,18 @@ func (m *mergeQueryable) UseQueryable(now time.Time, queryMinT, queryMaxT int64)
 
 // Querier returns a new mergeQuerier aggregating all readTenants into the result
 func (m *mergeQueryable) Querier(ctx context.Context, mint int64, maxt int64) (storage.Querier, error) {
-	readTenantIDs, _, err := m.resolver.ResolveReadTenants(ctx)
+	readTenantIDs, _, err := m.resolver.ReadTenantIDs(ctx)
 	if err != nil {
 		return nil, err
 	}
+	fmt.Printf("TODO::READ: %v\n", readTenantIDs)
 	if len(readTenantIDs) <= 1 {
 		return m.upstream.Querier(ctx, mint, maxt)
+	}
+
+	tenantLabelName, err := m.resolver.TenantLabelName(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	var queriers = make([]storage.Querier, len(readTenantIDs))
@@ -189,8 +183,9 @@ func (m *mergeQueryable) Querier(ctx context.Context, mint int64, maxt int64) (s
 	}
 
 	return &mergeQuerier{
-		queriers:  queriers,
-		tenantIDs: readTenantIDs,
+		queriers:        queriers,
+		tenantIDs:       readTenantIDs,
+		tenantLabelName: tenantLabelName,
 	}, nil
 }
 
