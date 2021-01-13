@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,8 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/pkg/rulefmt"
+	"github.com/prometheus/prometheus/pkg/value"
+	"github.com/prometheus/prometheus/prompb"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
@@ -188,25 +191,55 @@ func TestRulerEvaluationDelay(t *testing.T) {
 
 	// Start Cortex components.
 	require.NoError(t, copyFileToSharedDir(s, "docs/configuration/single-process-config.yaml", cortexConfigFile))
-	require.NoError(t, writeFileToSharedDir(s, filepath.Join("ruler_configs", user, namespace), []byte(cortexRulerEvalTimeConfigYaml)))
+	require.NoError(t, writeFileToSharedDir(s, filepath.Join("ruler_configs", user, namespace), []byte(cortexRulerEvalStaleNanConfigYaml)))
 	cortex := e2ecortex.NewSingleBinaryWithConfigFile("cortex", cortexConfigFile, configOverrides, "", 9009, 9095)
 	require.NoError(t, s.StartAndWaitReady(cortex))
 
 	// Create a client with the ruler address configured
-	c, err := e2ecortex.NewClient("", cortex.HTTPEndpoint(), "", cortex.HTTPEndpoint(), "")
+	c, err := e2ecortex.NewClient(cortex.HTTPEndpoint(), cortex.HTTPEndpoint(), "", cortex.HTTPEndpoint(), "")
 	require.NoError(t, err)
-
-	// Wait until the rule is evaluated
-	require.NoError(t, cortex.WaitSumMetrics(e2e.Greater(0), "cortex_prometheus_rule_evaluations_total"))
 
 	now := time.Now()
 
-	result, err := c.QueryRange("time_eval", now.Add(-10*time.Minute), now, time.Minute)
+	// Insert metrics that includes stale nans
+	series, _ := generateSeries("a_sometimes_stale_nan_series", now, prompb.Label{Name: "instance", Value: "sometimes-stale"})
+	series[0].Samples = []prompb.Sample{
+		{
+			Value:     1.0,
+			Timestamp: e2e.TimeToMilliseconds(now.Add(-300 * time.Second)),
+		},
+		{
+			Value:     math.Float64frombits(value.StaleNaN),
+			Timestamp: e2e.TimeToMilliseconds(now.Add(-299 * time.Second)),
+		},
+		{
+			Value:     2.0,
+			Timestamp: e2e.TimeToMilliseconds(now.Add(-298 * time.Second)),
+		},
+		{
+			Value:     3.0,
+			Timestamp: e2e.TimeToMilliseconds(now.Add(-297 * time.Second)),
+		},
+		{
+			Value:     4.0,
+			Timestamp: e2e.TimeToMilliseconds(now.Add(-296 * time.Second)),
+		},
+	}
+	res, err := c.Push(series)
+	require.NoError(t, err)
+	require.Equal(t, 200, res.StatusCode)
+
+	// Wait until the rule is evaluated
+	require.NoError(t, cortex.WaitSumMetrics(e2e.Greater(10), "cortex_prometheus_rule_evaluations_total"))
+
+	result, err := c.QueryRange("stale_nan_eval", now.Add(-5*time.Minute), now, time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, model.ValMatrix, result.Type())
 
 	// Iterate through the values recorded and ensure they exist in the past.
 	matrix := result.(model.Matrix)
+	defer time.Sleep(10 * time.Minute)
+	require.GreaterOrEqual(t, 1, matrix.Len())
 
 	// 290 seconds gives 10 seconds of slack between the rule evaluation and the query
 	// to account for CI latency, but ensures the latest evalation was in the past.
@@ -214,6 +247,7 @@ func TestRulerEvaluationDelay(t *testing.T) {
 
 	for _, m := range matrix {
 		for _, v := range m.Values {
+			t.Logf("metric: %v value: %v", m.Metric, m.Values)
 			diff := now.Unix() - int64(v.Value)
 			require.GreaterOrEqual(t, diff, maxDiff)
 		}
