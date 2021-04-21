@@ -141,7 +141,9 @@ func (m *mockSeriesSet) Err() error {
 // A collection of warnings for the whole set.
 // Warnings could be returned even if iteration has not failed with error.
 func (m *mockSeriesSet) Warnings() storage.Warnings {
-	return m.warnings
+	warnings := make(storage.Warnings, len(m.warnings))
+	copy(warnings, m.warnings)
+	return warnings
 }
 
 func (m mockTenantQuerier) Select(_ bool, sp *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {

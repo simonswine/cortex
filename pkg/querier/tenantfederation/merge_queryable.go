@@ -166,14 +166,13 @@ func (m *mergeQuerier) mergeDistinctStringSlice(f stringSliceFunc) ([]string, st
 				return errors.Wrapf(err, `error querying {%s="%s"}`, defaultTenantLabel, tenantID)
 			}
 
-			var warnings = make(storage.Warnings, len(resultWarnings))
 			for pos := range resultWarnings {
-				warnings[pos] = errors.Wrapf(resultWarnings[pos], `warning querying {%s="%s"}`, defaultTenantLabel, tenantID)
+				resultWarnings[pos] = errors.Wrapf(resultWarnings[pos], `warning querying {%s="%s"}`, defaultTenantLabel, tenantID)
 			}
 
 			resultCh <- &stringSliceFuncResult{
 				Result:   result,
-				Warnings: warnings,
+				Warnings: resultWarnings,
 			}
 
 			return nil
@@ -188,7 +187,6 @@ func (m *mergeQuerier) mergeDistinctStringSlice(f stringSliceFunc) ([]string, st
 	// no more results are expected
 	close(resultCh)
 
-	// aggregate warnings and deduplicate string results
 	var warnings storage.Warnings
 	resultMap := make(map[string]struct{})
 	for result := range resultCh {
