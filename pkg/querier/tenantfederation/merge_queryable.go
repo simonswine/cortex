@@ -41,32 +41,43 @@ func NewQueryable(upstream storage.Queryable, byPassWithSingleQuerier bool) stor
 }
 
 func tenantQuerierCallback(queryable storage.Queryable) MergeQuerierCallback {
-	return func(ctx context.Context, mint int64, maxt int64) ([]string, []storage.Querier, error) {
+	return func(ctx context.Context, mint int64, maxt int64) ([]string, []storage.Querier, func(), error) {
 		tenantIDs, err := tenant.TenantIDs(ctx)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
+
+		var spans = make([]*spanlogger.SpanLogger, len(tenantIDs))
 
 		var queriers = make([]storage.Querier, len(tenantIDs))
 		for pos, tenantID := range tenantIDs {
+			sctx := user.InjectOrgID(ctx, tenantID)
+			spans[pos], sctx = spanlogger.New(sctx, "mergeQuerier.NewQuerier")
+
 			q, err := queryable.Querier(
-				user.InjectOrgID(ctx, tenantID),
+				sctx,
 				mint,
 				maxt,
 			)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			queriers[pos] = q
 		}
 
-		return tenantIDs, queriers, nil
+		closer := func() {
+			for _, span := range spans {
+				span.Finish()
+			}
+		}
+
+		return tenantIDs, queriers, closer, nil
 	}
 }
 
 // MergeQuerierCallback returns the underlying queriers and their IDs relevant
 // for the query.
-type MergeQuerierCallback func(ctx context.Context, mint int64, maxt int64) (ids []string, queriers []storage.Querier, err error)
+type MergeQuerierCallback func(ctx context.Context, mint int64, maxt int64) (ids []string, queriers []storage.Querier, closer func(), err error)
 
 // NewMergeQueryable returns a queryable that merges results from multiple
 // underlying Queryables. The underlying queryables and its label values to be
@@ -100,7 +111,7 @@ func (m *mergeQueryable) Querier(ctx context.Context, mint int64, maxt int64) (s
 	// TODO: it's necessary to think how to override context inside querier
 	//  to mark spans created inside querier as child of a span created inside
 	//  methods of merged querier.
-	ids, queriers, err := m.callback(ctx, mint, maxt)
+	ids, queriers, closer, err := m.callback(ctx, mint, maxt)
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +126,7 @@ func (m *mergeQueryable) Querier(ctx context.Context, mint int64, maxt int64) (s
 		idLabelName: m.idLabelName,
 		queriers:    queriers,
 		ids:         ids,
+		closer:      closer,
 	}, nil
 }
 
@@ -129,6 +141,7 @@ type mergeQuerier struct {
 	queriers    []storage.Querier
 	idLabelName string
 	ids         []string
+	closer      func()
 }
 
 // LabelValues returns all potential values for a label name.  It is not safe
@@ -262,6 +275,7 @@ func (m *mergeQuerier) mergeDistinctStringSlice(f stringSliceFunc) ([]string, st
 
 // Close releases the resources of the Querier.
 func (m *mergeQuerier) Close() error {
+	m.closer()
 	errs := tsdb_errors.NewMulti()
 	for pos, id := range m.ids {
 		errs.Add(errors.Wrapf(m.queriers[pos].Close(), "failed to close querier for %s %s", rewriteLabelName(m.idLabelName), id))
